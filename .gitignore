@@ -20,6 +20,8 @@ venv.bak/
 chroma_data/
 *.sqlite3
 *.db
+*.ses
+:memory:*
 
 # Data & Uploads
 uploads/

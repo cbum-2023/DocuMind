@@ -3,11 +3,19 @@ from dotenv import load_dotenv
 
 load_dotenv()
 
-# Simple config - just reads from env, with sensible defaults
-OPENAI_API_KEY = os.getenv("OPENAI_API_KEY", "")
-CHROMA_DIR = os.getenv("CHROMA_DIR", "./chroma_data")
-EMBEDDING_MODEL = os.getenv("EMBEDDING_MODEL", "text-embedding-3-small")
-CHAT_MODEL = os.getenv("CHAT_MODEL", "gpt-4o-mini")
+# Disable ChromaDB telemetry logs
+os.environ["ANONYMIZED_TELEMETRY"] = "False"
 
-if not OPENAI_API_KEY:
-    print("WARNING: OPENAI_API_KEY not set. Set it in .env")
+GEMINI_API_KEY = os.getenv("GEMINI_API_KEY", "") or os.getenv("OPENAI_API_KEY", "")
+CHROMA_DIR = os.getenv("CHROMA_DIR", "./chroma_data")
+
+EMBEDDING_MODEL = "gemini-embedding-001"
+CHAT_MODEL = "gemini-3.8-flash"
+
+if not GEMINI_API_KEY:
+    print("WARNING: GEMINI_API_KEY not set. Set GEMINI_API_KEY in .env")
+
+
+
+
+

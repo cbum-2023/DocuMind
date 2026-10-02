@@ -1,16 +1,27 @@
-"""Core RAG logic - document processing, vector search, and LLM answering."""
+"""Core RAG logic - document processing, vector search, and Gemini LLM answering."""
 import time
 import uuid
 from typing import Optional, List
-from openai import OpenAI
 from . import config
 from .store import get_collection
 from .models import ChatMessage
 
-def get_openai_client():
-    if not config.OPENAI_API_KEY:
-        raise ValueError("OPENAI_API_KEY is missing. Please set it in your .env file.")
-    return OpenAI(api_key=config.OPENAI_API_KEY)
+def get_gemini_client():
+    if not config.GEMINI_API_KEY:
+        raise ValueError("GEMINI_API_KEY is missing. Please set GEMINI_API_KEY in your .env file.")
+    
+    try:
+        from google import genai
+        return genai.Client(api_key=config.GEMINI_API_KEY)
+    except ImportError:
+        try:
+            import google.generativeai as genai_legacy
+            genai_legacy.configure(api_key=config.GEMINI_API_KEY)
+            return genai_legacy
+        except ImportError:
+            raise ValueError(
+                "Gemini SDK is not installed. Please run 'pip install google-genai' in your terminal."
+            )
 
 def chunk_pages_with_metadata(pages: List[str], chunk_size=1000, overlap=200):
     """Concatenates pages to preserve sentence context across boundaries, 
@@ -39,7 +50,6 @@ def chunk_pages_with_metadata(pages: List[str], chunk_size=1000, overlap=200):
         chunk_str = full_text[start:end].strip()
         
         if chunk_str:
-            # find pages overlapping with start..end
             pages_involved = []
             for p_start, p_end, p_num in page_spans:
                 if max(start, p_start) < min(end, p_end):
@@ -59,7 +69,7 @@ def chunk_pages_with_metadata(pages: List[str], chunk_size=1000, overlap=200):
     return chunks
 
 def add_document(filename: str, pages: List[str]):
-    """Ingests PDF page texts, creates embeddings, and saves to ChromaDB."""
+    """Ingests PDF page texts, creates embeddings with Gemini, and saves to ChromaDB."""
     col = get_collection()
     doc_id = str(uuid.uuid4())[:8]
 
@@ -83,10 +93,33 @@ def add_document(filename: str, pages: List[str]):
     return doc_id, len(ids)
 
 def embed_texts(texts: List[str]):
-    """Get embeddings from OpenAI."""
-    client = get_openai_client()
-    resp = client.embeddings.create(model=config.EMBEDDING_MODEL, input=texts)
-    return [d.embedding for d in resp.data]
+    """Get embeddings from Google Gemini API."""
+    client = get_gemini_client()
+    embeddings = []
+    
+    model_name = config.EMBEDDING_MODEL
+    
+    if hasattr(client, 'models'):
+        for t in texts:
+            res = client.models.embed_content(
+                model=model_name,
+                contents=t
+            )
+            if hasattr(res, 'embeddings') and res.embeddings:
+                embeddings.append(res.embeddings[0].values)
+            elif hasattr(res, 'embedding'):
+                embeddings.append(res.embedding.values)
+            else:
+                raise ValueError("Could not extract embedding values from Gemini API response.")
+    else:
+        for t in texts:
+            res = client.embed_content(
+                model=f"models/{model_name}",
+                content=t
+            )
+            embeddings.append(res['embedding'])
+            
+    return embeddings
 
 def search(question: str, doc_id: Optional[str] = None, n_results=4):
     col = get_collection()
@@ -139,37 +172,60 @@ def answer_question(question: str, doc_id: Optional[str] = None, history: Option
 
     context = "\n\n".join([f"--- Source: {c['filename']} (Page {c['page']}) ---\n{c['text']}" for c in chunks])
 
-    messages = [
-        {
-            "role": "system",
-            "content": (
-                "You are DocuMind, an intelligent document analysis assistant. "
-                "Answer the user's question accurately using ONLY the provided context snippets below. "
-                "If the information is not contained in the context, state clearly: 'I don't know based on the provided document(s).' "
-                "Format your answer using clean Markdown (bullet points, bold text, headers where appropriate)."
-            )
-        }
-    ]
-
-    # Include recent conversation history if provided (up to last 6 messages)
-    if history:
-        for msg in history[-6:]:
-            messages.append({"role": msg.role, "content": msg.content})
-
-    # Add context + question as final user prompt
-    user_prompt = f"Context:\n{context}\n\nQuestion: {question}"
-    messages.append({"role": "user", "content": user_prompt})
-
-    client = get_openai_client()
-    resp = client.chat.completions.create(
-        model=config.CHAT_MODEL,
-        messages=messages,
-        temperature=0.2,
+    system_instruction = (
+        "You are DocuMind, an intelligent document analysis assistant. "
+        "Answer the user's question accurately using ONLY the provided context snippets below. "
+        "If the information is not contained in the context, state clearly: 'I don't know based on the provided document(s).' "
+        "Format your answer using clean Markdown (bullet points, bold text, headers where appropriate)."
     )
-    answer = resp.choices[0].message.content
+
+    prompt = f"Context:\n{context}\n\nQuestion: {question}"
+
+    client = get_gemini_client()
+    candidate_models = [config.CHAT_MODEL, "gemini-3.8-flash", "gemini-3.5-flash", "gemini-flash-latest"]
+    
+    unique_models = []
+    for m in candidate_models:
+        if m not in unique_models:
+            unique_models.append(m)
+
+    answer = None
+    last_error = None
+
+    for model_name in unique_models:
+        try:
+            if hasattr(client, 'models'):
+                from google.genai import types
+                response = client.models.generate_content(
+                    model=model_name,
+                    contents=prompt,
+                    config=types.GenerateContentConfig(
+                        system_instruction=system_instruction,
+                        temperature=0.2,
+                    )
+                )
+                answer = response.text
+            else:
+                model = client.GenerativeModel(
+                    model_name=model_name,
+                    system_instruction=system_instruction
+                )
+                response = model.generate_content(prompt)
+                answer = response.text
+                
+            if answer:
+                break
+        except Exception as e:
+            print(f"[ask warning] Model {model_name} failed: {e}. Trying fallback...")
+            last_error = e
+
+    if not answer:
+        raise ValueError(f"All Gemini models unavailable: {str(last_error)}")
 
     elapsed = int((time.time() - start) * 1000)
     print(f"[ask] q='{question[:50]}' chunks={len(chunks)} time={elapsed}ms")
 
     return answer, chunks
+
+
 

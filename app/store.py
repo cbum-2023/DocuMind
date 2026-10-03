@@ -8,8 +8,12 @@ collection = client.get_or_create_collection(
     metadata={"hnsw:space": "cosine"}
 )
 
+def get_client():
+    return client
+
 def get_collection():
     return collection
+
 
 def list_stored_documents():
     """Returns a list of dicts: [{'doc_id': ..., 'filename': ..., 'chunks': ...}]"""
